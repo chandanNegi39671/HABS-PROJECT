@@ -235,9 +235,6 @@ See [`ML_MODEL.md`](./ML_MODEL.md) for full model documentation.
 - [x] Admin approval workflow
 - [x] Email confirmation with PDF attachment
 - [x] Frontend connected to backend
-- [ ] SMS reminders via Twilio
-- [ ] Analytics dashboard
-- [ ] Reschedule flow
 
 ---
 
