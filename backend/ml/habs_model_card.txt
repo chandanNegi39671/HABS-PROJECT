@@ -1,0 +1,32 @@
+
+╔══════════════════════════════════════════════════════════════════╗
+║          HABS NO-SHOW PREDICTION — MODEL CARD                   ║
+╠══════════════════════════════════════════════════════════════════╣
+║  Model version    : habs_noshow_v1                              ║
+║  Training date    : 2026-05-12                                  ║
+║  Algorithm        : RandomForestClassifier (class_weight=balanced)║
+╠══════════════════════════════════════════════════════════════════╣
+║  BEST HYPERPARAMETERS (GridSearchCV 5-fold)                     ║
+║  n_estimators     : 300                                         ║
+║  max_depth        : 10                                          ║
+║  min_samples_split: 5                                           ║
+╠══════════════════════════════════════════════════════════════════╣
+║  PERFORMANCE (hold-out test, threshold=0.4)                 ║
+║  CV AUC-ROC       : 0.6121                                    ║
+║  Test AUC-ROC     : 0.6155                                    ║
+║  Test F1          : 0.4585                                    ║
+║  Test Recall      : 0.8635                                    ║
+║  Test Precision   : 0.3121                                    ║
+║  Test Accuracy    : 0.4182                                    ║
+╠══════════════════════════════════════════════════════════════════╣
+║  TOP-5 FEATURES (SHAP)                                          ║
+║  1. Age                                                           ║
+║  2. lead_time_days                                                ║
+║  3. patient_age_group_enc                                         ║
+║  4. sms_reminder_sent                                             ║
+║  5. appointment_hour                                              ║
+╠══════════════════════════════════════════════════════════════════╣
+║  Train samples    : 57,563                                      ║
+║  Test samples     : 14,391                                      ║
+║  Features         : 18                                          ║
+╚══════════════════════════════════════════════════════════════════╝
