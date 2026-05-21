@@ -56,7 +56,7 @@ async def global_exception_handler(request: Request, exc: Exception):
 # CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[settings.FRONTEND_ORIGIN, "http://127.0.0.1:5173"],
+    allow_origins=["https://habs-the-appointment-system.vercel.app", "http://127.0.0.1:5173", "http://localhost:5173"],
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
