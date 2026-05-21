@@ -32,3 +32,6 @@ lerna-debug.log*
 
 # ML Model (Ensuring it's NOT ignored)
 !backend/ml/model/habs_noshow_model_v1.joblib
+
+**/__pycache__/
+**/*.pyc
