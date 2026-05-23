@@ -27,6 +27,7 @@ class UserLogin(BaseModel):
 
 class OTPRequest(BaseModel):
     email: EmailStr
+    role: str = "patient"
 
 class OTPVerify(UserCreate):
     otp_code: str
