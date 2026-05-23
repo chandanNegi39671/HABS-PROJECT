@@ -17,34 +17,31 @@ settings = get_settings()
 
 def send_email(to_email: str, subject: str, body: str) -> bool:
     try:
-        import smtplib
-        from email.mime.text import MIMEText
-        from email.mime.multipart import MIMEMultipart
-
-        msg = MIMEMultipart()
-        msg['From'] = settings.EMAIL_FROM
-        msg['To'] = to_email
-        msg['Subject'] = subject
-        msg.attach(MIMEText(body, 'plain'))
-
-        with smtplib.SMTP(settings.EMAIL_HOST,
-                          settings.EMAIL_PORT) as server:
-            server.ehlo()
-            server.starttls()
-            server.ehlo()
-            server.login(
-                settings.EMAIL_USER,
-                settings.EMAIL_PASSWORD
-            )
-            server.send_message(msg)
-
-        print(f"Email sent successfully to {to_email}")
-        return True
-
+        import httpx
+        response = httpx.post(
+            "https://api.resend.com/emails",
+            headers={
+                "Authorization": f"Bearer {settings.RESEND_API_KEY}",
+                "Content-Type": "application/json"
+            },
+            json={
+                "from": f"HABS Healthcare <onboarding@resend.dev>",
+                "to": [to_email],
+                "subject": subject,
+                "text": body
+            },
+            timeout=10
+        )
+        if response.status_code == 200:
+            print(f"Email sent via Resend to {to_email}")
+            return True
+        else:
+            print(f"Resend error: {response.text}")
+            return False
     except Exception as e:
         print(f"Email failed: {e}")
         return False
-
+        
 @router.post("/send-otp")
 async def send_otp(req: OTPRequest, db: AsyncSession = Depends(get_db)):
     user_repo = UserRepository(db)
