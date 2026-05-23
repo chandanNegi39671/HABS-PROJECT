@@ -24,26 +24,29 @@ from habs_db.settings import Settings
 logger = logging.getLogger(__name__)
 
 # ─────────────────────────────── Engine ──────────────────────────────────────
-
 def build_engine(settings: Settings) -> AsyncEngine:
-    """
-    Factory that creates the async engine.
-    Uses NullPool in test mode to avoid connection leaks between test cases.
-    """
     pool_cls = NullPool if settings.TESTING else None
+
+    connect_args = {
+        "statement_cache_size": 0,
+    }
 
     engine_kwargs: dict = dict(
         echo=settings.DB_ECHO,
-        pool_pre_ping=True,          # evicts stale connections
+        pool_pre_ping=True,
         pool_size=settings.DB_POOL_SIZE,
         max_overflow=settings.DB_MAX_OVERFLOW,
         pool_recycle=settings.DB_POOL_RECYCLE,
+        connect_args=connect_args,
     )
     if pool_cls:
-        engine_kwargs = dict(echo=settings.DB_ECHO, poolclass=pool_cls)
+        engine_kwargs = dict(
+            echo=settings.DB_ECHO,
+            poolclass=pool_cls,
+            connect_args=connect_args,
+        )
 
     return create_async_engine(settings.ASYNC_DATABASE_URL, **engine_kwargs)
-
 
 # ─────────────────────────────── Session factory ─────────────────────────────
 
