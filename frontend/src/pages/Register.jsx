@@ -35,12 +35,28 @@ export default function Register() {
     setError('');
     setIsLoading(true);
     try {
-      await api.post('/auth/send-otp', { email: formData.email });
+      const res = await api.post('/auth/send-otp', { email: formData.email, role: formData.role });
+      // Doctor ke liye OTP nahi — seedha register
+      if (formData.role === 'doctor' && res.data.skip_otp) {
+        await handleDoctorRegister();
+        return;
+      }
       setStep(2);
       setTimer(600);
       setOtp(Array(6).fill(''));
     } catch (err) {
       setError(err.response?.data?.detail || 'Failed to send OTP');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleDoctorRegister = async () => {
+    try {
+      await api.post('/auth/verify-otp', { ...formData, otp_code: '000000' });
+      setSuccess(true);
+    } catch (err) {
+      setError(err.response?.data?.detail || 'Registration failed');
     } finally {
       setIsLoading(false);
     }
@@ -251,7 +267,7 @@ export default function Register() {
                           <option>Other</option>
                         </select></div>
                         <div className="input-wrap"><span className="input-icon"><Tag size={16} color="#a08070" /></span><input type="text" className="habs-input" placeholder="Doctor invite code" value={formData.invite_code} onChange={e => { setFormData({ ...formData, invite_code: e.target.value }); setError(''); }} required={formData.role === 'doctor'} /></div>
-                        <button type="submit" className="habs-btn" disabled={isLoading} style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px' }}>{isLoading ? 'Please wait…' : <><span>Send OTP</span><ArrowRight size={15} /></>}</button>
+                        <button type="submit" className="habs-btn" disabled={isLoading} style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px' }}>{isLoading ? 'Please wait…' : <><span>Register</span><ArrowRight size={15} /></>}</button>
                       </div>
                     </div>
                   </div>
