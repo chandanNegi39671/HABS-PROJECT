@@ -43,6 +43,10 @@ def send_email(to_email: str, subject: str, body: str) -> bool:
 
 @router.post("/send-otp")
 async def send_otp(req: OTPRequest, db: AsyncSession = Depends(get_db)):
+    # Doctor ko OTP nahi chahiye — admin approve karega
+    if req.role == "doctor":
+        return {"message": "OTP not required for doctors", "skip_otp": True}
+
     user_repo = UserRepository(db)
     existing_user = await user_repo.get_by_email(req.email)
     if existing_user:
