@@ -17,7 +17,6 @@ settings = get_settings()
 
 def send_email(to_email: str, subject: str, body: str) -> bool:
     try:
-        import httpx
         response = httpx.post(
             "https://api.resend.com/emails",
             headers={
@@ -25,7 +24,7 @@ def send_email(to_email: str, subject: str, body: str) -> bool:
                 "Content-Type": "application/json"
             },
             json={
-                "from": f"HABS Healthcare <onboarding@resend.dev>",
+                "from": "HABS Healthcare <onboarding@resend.dev>",
                 "to": [to_email],
                 "subject": subject,
                 "text": body
@@ -41,7 +40,7 @@ def send_email(to_email: str, subject: str, body: str) -> bool:
     except Exception as e:
         print(f"Email failed: {e}")
         return False
-        
+
 @router.post("/send-otp")
 async def send_otp(req: OTPRequest, db: AsyncSession = Depends(get_db)):
     user_repo = UserRepository(db)
@@ -72,7 +71,6 @@ Do not share this code with anyone."""
     email_sent = send_email(req.email, subject, body)
 
     if not email_sent:
-        # FIX: never expose OTP in response — log server-side only
         print(f"[SERVER ONLY] OTP for {req.email}: {otp_code}")
         raise HTTPException(
             status_code=500,
@@ -166,7 +164,7 @@ async def verify_otp(data: OTPVerify, db: AsyncSession = Depends(get_db)):
 
         return {"message": "Registration submitted. Awaiting admin approval. You will be notified via email."}
 
-    else:  # role == "patient"
+    else:
         new_user = User(
             full_name=data.full_name,
             email=data.email,
@@ -220,8 +218,6 @@ async def admin_login(user_in: UserLogin, db: AsyncSession = Depends(get_db)):
         "user_id": str(admin.id),
         "user": {"id": str(admin.id), "email": admin.email, "role": "admin", "full_name": admin.full_name}
     }
-
-# FIX: /auth/register legacy endpoint removed — bypassed OTP entirely
 
 @router.post("/login", response_model=Token)
 async def login(user_in: UserLogin, db: AsyncSession = Depends(get_db)):
@@ -286,21 +282,9 @@ async def forgot_password(payload: dict, db: AsyncSession = Depends(get_db)):
     db.add(otp_entry)
     await db.commit()
 
-    # Log server-side only — never expose OTP in response
     print(f"[SERVER ONLY] Password reset OTP for {email}: {otp_code}")
 
-    try:
-        import smtplib
-        from email.mime.text import MIMEText
-        from email.mime.multipart import MIMEMultipart
-
-        msg = MIMEMultipart()
-        msg['From'] = f"HABS Healthcare <{settings.EMAIL_FROM if settings.EMAIL_FROM else settings.EMAIL_USER}>"
-        msg['Reply-To'] = settings.EMAIL_USER
-        msg['To'] = email
-        msg['Subject'] = "HABS — Password Reset OTP"
-
-        body = f"""Dear {user.full_name},
+    body = f"""Dear {user.full_name},
 
 Your password reset OTP is: {otp_code}
 
@@ -308,15 +292,8 @@ This OTP is valid for 10 minutes.
 If you did not request this, ignore this email.
 
 — HABS Healthcare Team"""
-        msg.attach(MIMEText(body, 'plain'))
 
-        server = smtplib.SMTP(settings.EMAIL_HOST, settings.EMAIL_PORT)
-        server.starttls()
-        server.login(settings.EMAIL_USER, settings.EMAIL_PASSWORD)
-        server.send_message(msg)
-        server.quit()
-    except Exception as e:
-        print(f"[EMAIL ERROR] forgot_password: {type(e).__name__}: {e}")
+    send_email(email, "HABS — Password Reset OTP", body)
 
     return {"message": "OTP sent to your email."}
 
@@ -345,7 +322,6 @@ async def verify_reset_otp(payload: dict, db: AsyncSession = Depends(get_db)):
     otp_entry.is_used = True
     await db.commit()
 
-    # FIX #2: issue a short-lived signed reset token instead of trusting raw email
     reset_token = create_access_token(
         data={"sub": email, "purpose": "password_reset"},
         expires_delta=timedelta(minutes=15)
@@ -356,7 +332,6 @@ async def verify_reset_otp(payload: dict, db: AsyncSession = Depends(get_db)):
 
 @router.post("/reset-password")
 async def reset_password(payload: dict, db: AsyncSession = Depends(get_db)):
-    # FIX #2: validate signed reset token — not raw email
     from security import decode_access_token
 
     reset_token = payload.get("reset_token", "")
