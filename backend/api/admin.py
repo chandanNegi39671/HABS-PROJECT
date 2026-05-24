@@ -6,9 +6,6 @@ from habs_db.repositories.database import get_db
 from habs_db.models import User, Doctor, Appointment, AppointmentStatus
 from habs_db.settings import get_settings
 from jose import jwt, JWTError
-import smtplib
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
 
 router = APIRouter()
 settings = get_settings()
@@ -29,18 +26,27 @@ async def verify_admin(req: Request):
 
 def send_email(to_email, subject, body):
     try:
-        msg = MIMEMultipart()
-        msg['From'] = settings.EMAIL_USER
-        msg['To'] = to_email
-        msg['Subject'] = subject
-        msg.attach(MIMEText(body, 'plain'))
-
-        server = smtplib.SMTP(settings.EMAIL_HOST, settings.EMAIL_PORT)
-        server.starttls()
-        server.login(settings.EMAIL_USER, settings.EMAIL_PASSWORD)
-        server.send_message(msg)
-        server.quit()
-        return True
+        import httpx
+        response = httpx.post(
+            "https://api.resend.com/emails",
+            headers={
+                "Authorization": f"Bearer {settings.RESEND_API_KEY}",
+                "Content-Type": "application/json"
+            },
+            json={
+                "from": "HABS Healthcare <onboarding@resend.dev>",
+                "to": [to_email],
+                "subject": subject,
+                "text": body
+            },
+            timeout=10
+        )
+        if response.status_code == 200:
+            print(f"Email sent via Resend to {to_email}")
+            return True
+        else:
+            print(f"Resend error: {response.text}")
+            return False
     except Exception as e:
         print(f"Failed to send email: {e}")
         return False
