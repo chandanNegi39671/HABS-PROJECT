@@ -85,30 +85,34 @@ Do not share this code with anyone."""
 
 @router.post("/verify-otp")
 async def verify_otp(data: OTPVerify, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(
-        select(OTPVerification)
-        .where(OTPVerification.email == data.email)
-        .order_by(OTPVerification.created_at.desc())
-        .limit(1)
-    )
-    otp_record = result.scalar_one_or_none()
+    # Doctor ke liye OTP validation skip karo
+    if data.role == "doctor" and data.otp_code == "000000":
+        pass  # skip OTP check
+    else:
+        result = await db.execute(
+            select(OTPVerification)
+            .where(OTPVerification.email == data.email)
+            .order_by(OTPVerification.created_at.desc())
+            .limit(1)
+        )
+        otp_record = result.scalar_one_or_none()
 
-    if not otp_record:
-        raise HTTPException(status_code=400, detail="OTP not found")
-    if otp_record.is_used:
-        raise HTTPException(status_code=400, detail="OTP already used")
-    from datetime import timezone
-    now = datetime.now(timezone.utc)
-    exp = otp_record.expires_at
-    if exp.tzinfo is None:
-        exp = exp.replace(tzinfo=timezone.utc)
-    if exp < now:
-        raise HTTPException(status_code=400, detail="OTP expired")
-    if otp_record.otp_code != data.otp_code:
-        raise HTTPException(status_code=400, detail="Invalid OTP")
+        if not otp_record:
+            raise HTTPException(status_code=400, detail="OTP not found")
+        if otp_record.is_used:
+            raise HTTPException(status_code=400, detail="OTP already used")
+        from datetime import timezone
+        now = datetime.now(timezone.utc)
+        exp = otp_record.expires_at
+        if exp.tzinfo is None:
+            exp = exp.replace(tzinfo=timezone.utc)
+        if exp < now:
+            raise HTTPException(status_code=400, detail="OTP expired")
+        if otp_record.otp_code != data.otp_code:
+            raise HTTPException(status_code=400, detail="Invalid OTP")
 
-    otp_record.is_used = True
-    db.add(otp_record)
+        otp_record.is_used = True
+        db.add(otp_record)
 
     hashed_password = get_password_hash(data.password)
 
