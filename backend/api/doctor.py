@@ -34,7 +34,6 @@ async def get_dashboard(req: Request, db: AsyncSession = Depends(get_db)):
 
     doctor_id = uuid.UUID(user_id_str)
 
-    # Fetch upcoming appointments with patient details
     result = await db.execute(
         select(Appointment)
         .options(selectinload(Appointment.patient))
@@ -49,7 +48,8 @@ async def get_dashboard(req: Request, db: AsyncSession = Depends(get_db)):
         "date": str(a.appointment_date),
         "time": a.time_slot,
         "status": a.status.value,
-        "risk": a.no_show_risk
+        "risk": a.no_show_risk,
+        "lead_time_days": a.lead_time_days
     } for a in appts]
 
 
@@ -60,16 +60,13 @@ async def update_status(
     db: AsyncSession = Depends(get_db),
     current_user=Depends(get_current_user)
 ):
-    # 1. Fetch the appointment first
     appt = await db.get(Appointment, appointment_id)
     if not appt:
         raise HTTPException(status_code=404, detail="Appointment not found")
 
-    # 2. Ownership check — only the owning doctor can update
     if str(appt.doctor_id) != current_user.id:
         raise HTTPException(status_code=403, detail="Forbidden — not your appointment")
 
-    # 3. Now do the status update
     appt_repo = AppointmentRepository(db)
     if status == "completed":
         success = await appt_repo.mark_completed(appointment_id)
