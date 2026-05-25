@@ -33,8 +33,17 @@ export default function PatientDashboard() {
     : 'U';
 
   const fetchAppointments = () => {
-    api.get('/appointments', { headers: { 'X-User-Id': userId } })
-      .then(res => { const data = res.data; setAppointments(Array.isArray(data) ? data : []); })
+    api.get('/appointments/my')
+      .then(res => {
+      const data = res.data;
+      const mapped = Array.isArray(data) ? data.map(a => ({
+        ...a,
+        date: a.appointment_date || a.date,
+        time: a.time_slot || a.time,
+        doctor_spec: a.specialization || a.doctor_spec,
+      })) : [];
+      setAppointments(mapped);
+    })
       .catch(err => console.error(err));
   };
 
@@ -67,9 +76,9 @@ export default function PatientDashboard() {
   const handleBook = () => {
     setBookingError('');
     const doc = (doctors || []).find(d => d.id === selectedDoc);
-    api.post('/appointments', { doctor_id: selectedDoc, appointment_date: selectedDate, time_slot: selectedSlot }, { headers: { 'X-User-Id': userId } })
+    api.post('/appointments/book', { doctor_id: selectedDoc, appointment_date: selectedDate, time_slot: selectedSlot })
       .then(res => {
-        setConfirmed({ id: res.data.appointment_id, doc: { name: doc?.name || doc?.full_name, spec: doc?.spec || doc?.specialization }, date: selectedDate, time: selectedSlot });
+        setConfirmed({ id: res.data.id, doc: { name: doc?.name || doc?.full_name, spec: doc?.spec || doc?.specialization }, date: selectedDate, time: selectedSlot });
         fetchAppointments();
       })
       .catch(err => {
@@ -83,7 +92,7 @@ export default function PatientDashboard() {
 
   const handleCancel = (id) => {
     if (window.confirm('Are you sure you want to cancel this appointment?')) {
-      api.patch(`/appointments/${id}/cancel`, {}, { headers: { 'X-User-Id': userId } })
+      api.patch(`/appointments/${id}/cancel`)
         .then(fetchAppointments).catch(err => console.error(err));
     }
   };
