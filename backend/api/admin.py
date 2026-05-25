@@ -85,7 +85,11 @@ async def get_stats(db: AsyncSession = Depends(get_db)):
     # Total patients (Users who are not doctors and not admins)
     # Actually, let's just count all Users for simplicity, or those with role patient.
     # Since we don't have a role column in User model, we'll assume Users not in Doctor table are patients.
-    patients_count = await db.scalar(select(func.count(User.id)))
+    # Count only patients (users NOT in doctors table)
+    doctor_subq = select(Doctor.id)
+    patients_count = await db.scalar(
+        select(func.count(User.id)).where(User.id.not_in(doctor_subq))
+    )
     
     # Approved doctors
     approved_doctors_count = await db.scalar(
@@ -112,6 +116,27 @@ async def get_stats(db: AsyncSession = Depends(get_db)):
         "appointments_count": appointments_count,
         "high_risk_appointments_count": high_risk_count
     }
+
+
+@router.get("/patients", dependencies=[Depends(verify_admin)])
+async def get_patients(db: AsyncSession = Depends(get_db)):
+    doctor_subq = select(Doctor.id)
+    result = await db.execute(
+        select(User).where(User.id.not_in(doctor_subq)).order_by(User.created_at.desc())
+    )
+    patients = result.scalars().all()
+    return [
+        {
+            "id": str(p.id),
+            "full_name": p.full_name,
+            "email": p.email,
+            "phone": p.phone,
+            "gender": p.gender,
+            "is_active": p.is_active,
+            "created_at": str(p.created_at),
+        }
+        for p in patients
+    ]
 
 @router.patch("/doctors/{doctor_id}/approve", dependencies=[Depends(verify_admin)])
 async def approve_doctor(doctor_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
