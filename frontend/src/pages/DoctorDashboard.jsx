@@ -34,8 +34,15 @@ export default function DoctorDashboard() {
   };
 
   const updateStatus = async (id, status) => {
-    try { await api.patch(`/doctor/${id}/status?status=${status}`); fetchAppointments(); }
-    catch (err) { console.error('Error updating status:', err); }
+    try { 
+      await api.patch(`/doctor/${id}/status?status=${status}`);
+      fetchAppointments();
+    }
+    catch (err) { 
+      console.error('Error updating status:', err);
+      const msg = err.response?.data?.detail || 'Failed to update status';
+      alert(msg);
+    }
   };
 
   const filtered = appointments.filter(a => {
