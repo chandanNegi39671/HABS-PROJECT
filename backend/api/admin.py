@@ -82,13 +82,11 @@ async def get_all_doctors(db: AsyncSession = Depends(get_db)):
 
 @router.get("/stats", dependencies=[Depends(verify_admin)])
 async def get_stats(db: AsyncSession = Depends(get_db)):
-    # Total patients (Users who are not doctors and not admins)
-    # Actually, let's just count all Users for simplicity, or those with role patient.
-    # Since we don't have a role column in User model, we'll assume Users not in Doctor table are patients.
-    # Count only patients (users NOT in doctors table)
-    doctor_subq = select(Doctor.id)
+    # Count only real patients — LEFT JOIN is more reliable than NOT IN
     patients_count = await db.scalar(
-        select(func.count(User.id)).where(User.id.not_in(doctor_subq))
+        select(func.count(User.id))
+        .outerjoin(Doctor, User.id == Doctor.id)
+        .where(Doctor.id == None)
     )
     
     # Approved doctors
@@ -120,9 +118,11 @@ async def get_stats(db: AsyncSession = Depends(get_db)):
 
 @router.get("/patients", dependencies=[Depends(verify_admin)])
 async def get_patients(db: AsyncSession = Depends(get_db)):
-    doctor_subq = select(Doctor.id)
     result = await db.execute(
-        select(User).where(User.id.not_in(doctor_subq)).order_by(User.created_at.desc())
+        select(User)
+        .outerjoin(Doctor, User.id == Doctor.id)
+        .where(Doctor.id == None)
+        .order_by(User.created_at.desc())
     )
     patients = result.scalars().all()
     return [
