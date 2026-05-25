@@ -13,6 +13,14 @@ export default function AdminDashboard() {
   const [rejectionReason, setRejectionReason] = useState({});
   const [showRejectInput, setShowRejectInput] = useState({});
 
+  const fetchPatients = async () => {
+    try {
+      const res = await api.get('/admin/patients');
+      setPatients(res.data);
+      setShowPatients(true);
+    } catch (err) { console.error(err); }
+  };
+
   const fetchData = async () => {
     try {
       const [statsRes, pendingRes, allRes] = await Promise.all([
@@ -60,7 +68,7 @@ export default function AdminDashboard() {
   );
 
   const statCards = [
-    { label: 'Total Patients', value: stats.patients_count, icon: <Users size={20} color="#c9a84c" />, color: '#c9a84c', bg: 'rgba(201,168,76,0.10)' },
+    { label: 'Total Patients', value: stats.patients_count, icon: <Users size={20} color="#c9a84c" />, color: '#c9a84c', bg: 'rgba(201,168,76,0.10)', onClick: fetchPatients },
     { label: 'Approved Doctors', value: stats.approved_doctors_count, icon: <Stethoscope size={20} color="#4a9b6f" />, color: '#4a9b6f', bg: 'rgba(74,155,111,0.10)' },
     { label: 'Pending Approvals', value: stats.pending_doctors_count, icon: <Clock size={20} color="#a07830" />, color: '#a07830', bg: 'rgba(201,168,76,0.08)' },
     { label: 'High Risk Appts', value: stats.high_risk_appointments_count, icon: <AlertTriangle size={20} color="#c0392b" />, color: '#c0392b', bg: 'rgba(192,57,43,0.08)' },
@@ -231,6 +239,28 @@ export default function AdminDashboard() {
           </div>
         )}
       </div>
+    </div>
+
+      {/* Patient List Modal */}
+      {showPatients && (
+        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+          <div style={{ background: '#fff', borderRadius: '16px', padding: '32px', maxWidth: '700px', width: '90%', maxHeight: '80vh', overflowY: 'auto' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
+              <h2 style={{ color: '#3d2b1f', fontFamily: 'Playfair Display, serif', fontSize: '24px' }}>All Patients ({patients.length})</h2>
+              <button onClick={() => setShowPatients(false)} style={{ background: 'none', border: 'none', fontSize: '24px', cursor: 'pointer', color: '#6b4c3b' }}>×</button>
+            </div>
+            {patients.map(p => (
+              <div key={p.id} style={{ padding: '16px', borderBottom: '1px solid #f0ebe2', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <div>
+                  <div style={{ fontWeight: 600, color: '#3d2b1f' }}>{p.full_name}</div>
+                  <div style={{ fontSize: '13px', color: '#a08070' }}>{p.email}</div>
+                </div>
+                <div style={{ fontSize: '12px', color: '#a08070' }}>{p.gender || 'N/A'}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
