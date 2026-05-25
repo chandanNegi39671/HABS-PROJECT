@@ -12,6 +12,8 @@ export default function AdminDashboard() {
   const [activeTab, setActiveTab] = useState('pending');
   const [rejectionReason, setRejectionReason] = useState({});
   const [showRejectInput, setShowRejectInput] = useState({});
+  const [patients, setPatients] = useState([]);
+  const [showPatients, setShowPatients] = useState(false);
 
   const fetchPatients = async () => {
     try {
@@ -82,6 +84,7 @@ export default function AdminDashboard() {
   }[s] || { bg: '#f5f0e8', color: '#a08070' });
 
   return (
+    <>
     <div style={{ background: '#fdfcf8', minHeight: '100vh', fontFamily: "'Inter', sans-serif" }}>
       <style>{`
         .tab-btn { padding: 1rem 0; background: none; border: none; font-weight: 700; cursor: pointer; font-size: 14px; font-family: inherit; transition: color 0.2s; border-bottom: 2px solid transparent; }
@@ -124,7 +127,12 @@ export default function AdminDashboard() {
         {/* STAT CARDS */}
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '1.25rem', marginBottom: '2.5rem' }}>
           {statCards.map(s => (
-            <div key={s.label} style={{ background: '#fff', border: '1px solid #e8e0d4', borderRadius: '14px', padding: '20px 22px', boxShadow: '0 1px 6px rgba(61,43,31,0.05)' }}>
+            <div key={s.label}
+              onClick={s.onClick}
+              style={{ background: '#fff', border: '1px solid #e8e0d4', borderRadius: '14px', padding: '20px 22px', boxShadow: '0 1px 6px rgba(61,43,31,0.05)', cursor: s.onClick ? 'pointer' : 'default', transition: 'box-shadow 0.2s' }}
+              onMouseEnter={e => { if (s.onClick) e.currentTarget.style.boxShadow = '0 4px 16px rgba(201,168,76,0.18)'; }}
+              onMouseLeave={e => { if (s.onClick) e.currentTarget.style.boxShadow = '0 1px 6px rgba(61,43,31,0.05)'; }}
+            >
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '12px' }}>
                 <div style={{ fontSize: '10px', color: '#a08070', textTransform: 'uppercase', letterSpacing: '0.1em', fontWeight: 600 }}>{s.label}</div>
                 <div style={{ width: '36px', height: '36px', borderRadius: '8px', background: s.bg, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '18px' }}>{s.icon}</div>
@@ -261,6 +269,6 @@ export default function AdminDashboard() {
           </div>
         </div>
       )}
-    </div>
+    </>
   );
 }
