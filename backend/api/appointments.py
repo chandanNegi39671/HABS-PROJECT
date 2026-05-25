@@ -1,286 +1,215 @@
 """
-HABS — Appointments Repository
-Most critical repo: double-booking guard, dashboard query,
-ML feature aggregation (single subquery), soft-delete via status.
+HABS — Appointments API Router
+Handles booking, listing, and cancellation for patients.
 """
-
-from __future__ import annotations
 
 import uuid
 from datetime import date, datetime, timedelta
-from typing import Sequence
 
-from sqlalchemy import and_, case, func, insert, select, update
-from sqlalchemy.dialects.postgresql import insert as pg_insert
-from sqlalchemy.exc import IntegrityError
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
+from sqlalchemy.orm import selectinload
 
-from habs_db.models import Appointment, AppointmentStatus
-from habs_db.repositories.base import BaseRepository
+from habs_db.repositories.database import get_db
+from habs_db.repositories.appointments import AppointmentRepository
+from habs_db.models import Appointment, AppointmentStatus, User, Doctor
+from api.schemas import AppointmentBook
+from security import get_current_user
+
+router = APIRouter()
 
 
-class AppointmentRepository(BaseRepository[Appointment]):
-    model = Appointment
+# ─────────────────────────────────────────────────────────────────────────────
+# BOOK — patient books an appointment
+# ─────────────────────────────────────────────────────────────────────────────
 
-    def __init__(self, session: AsyncSession) -> None:
-        super().__init__(session)
+@router.post("/book", status_code=status.HTTP_201_CREATED)
+async def book_appointment(
+    data: AppointmentBook,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    patient_id = uuid.UUID(current_user.id)
 
-    # ─────────────────────────────────────────────────────────────────────────
-    # BOOKING — double-booking guard via UNIQUE constraint
-    # ─────────────────────────────────────────────────────────────────────────
+    # Validate appointment date is not in the past
+    if data.appointment_date < date.today():
+        raise HTTPException(status_code=400, detail="Cannot book an appointment in the past")
 
-    async def book(self, appointment: Appointment) -> Appointment:
-        """
-        Safe INSERT.  The UNIQUE(doctor_id, appointment_date, time_slot) constraint
-        is the authoritative guard.  We let PostgreSQL raise the IntegrityError
-        rather than doing a SELECT + INSERT (TOCTOU race).
+    # Derive appointment_hour and lead_time_days from slot and date
+    try:
+        appointment_hour = int(data.time_slot.split(":")[0])
+    except (ValueError, AttributeError):
+        raise HTTPException(status_code=400, detail="Invalid time_slot format — expected HH:MM")
 
-        ORM version:
-            session.add(appointment)
-            await session.flush()
+    lead_time_days = (data.appointment_date - date.today()).days
 
-        Raw SQL equivalent:
-            INSERT INTO appointments (id, patient_id, doctor_id, appointment_date,
-                time_slot, appointment_hour, lead_time_days, status, ...)
-            VALUES (:id, :patient_id, :doctor_id, :appointment_date,
-                :time_slot, :appointment_hour, :lead_time_days, 'booked', ...)
-            ON CONFLICT (doctor_id, appointment_date, time_slot) DO NOTHING
-            RETURNING id;
+    # Fetch patient ML history for risk prediction
+    appt_repo = AppointmentRepository(db)
+    ml_history = await appt_repo.get_patient_ml_history(patient_id)
 
-        EXPLAIN ANALYZE (expected):
-            Insert on appointments (cost=0.00..0.01 rows=1 width=...)
-              Conflict Resolution: NOTHING
-              Conflict Arbiter Indexes: uq_doctor_date_slot
-              -> Result (cost=0.00..0.01 rows=1)
+    # Fetch patient record for ML features
+    patient_result = await db.execute(select(User).where(User.id == patient_id))
+    patient = patient_result.scalar_one_or_none()
+    if not patient:
+        raise HTTPException(status_code=404, detail="Patient record not found")
 
-        Index used: uq_doctor_date_slot (UNIQUE)
-        """
-        try:
-            self.session.add(appointment)
-            await self.session.flush()
-            await self.session.refresh(appointment)
-            return appointment
-        except IntegrityError as exc:
-            await self.session.rollback()
-            if "uq_doctor_date_slot" in str(exc.orig):
-                raise ValueError(
-                    f"Slot already booked: doctor={appointment.doctor_id} "
-                    f"date={appointment.appointment_date} slot={appointment.time_slot}"
-                ) from exc
-            raise
+    # Build appointment object
+    appointment = Appointment(
+        id=uuid.uuid4(),
+        patient_id=patient_id,
+        doctor_id=data.doctor_id,
+        appointment_date=data.appointment_date,
+        time_slot=data.time_slot,
+        appointment_hour=appointment_hour,
+        lead_time_days=lead_time_days,
+        status=AppointmentStatus.BOOKED,
+    )
 
-    # ─────────────────────────────────────────────────────────────────────────
-    # DOCTOR DASHBOARD — today + 7 days, uses composite index
-    # ─────────────────────────────────────────────────────────────────────────
+    # Try to save (double-booking guard via UNIQUE constraint in DB)
+    try:
+        saved = await appt_repo.book(appointment)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
 
-    async def get_doctor_upcoming(
-        self,
-        doctor_id: uuid.UUID,
-        *,
-        days_ahead: int = 7,
-    ) -> Sequence[Appointment]:
-        """
-        Appointments for a doctor from today through the next `days_ahead` days.
-        Orders by date + time_slot for the scheduling view.
+    # Run ML risk prediction if model is loaded
+    no_show_risk = None
+    try:
+        ml_model = getattr(request.app.state, "ml_model", None)
+        if ml_model is not None:
+            age = None
+            if patient.date_of_birth:
+                age = (date.today() - patient.date_of_birth).days // 365
 
-        ORM version: (below)
+            features = [[
+                age or 30,
+                1 if (patient.gender or "").lower() == "female" else 0,
+                int(getattr(patient, "scholarship", False) or False),
+                int(getattr(patient, "hypertension", False) or False),
+                int(getattr(patient, "diabetes", False) or False),
+                int(getattr(patient, "alcoholism", False) or False),
+                int(getattr(patient, "has_chronic_condition", False) or False),
+                lead_time_days,
+                appointment_hour,
+                ml_history["prior_appointment_count"],
+                ml_history["prior_no_show_count"],
+            ]]
+            prob = ml_model.predict_proba(features)[0][1]
+            no_show_risk = round(float(prob), 4)
+            await appt_repo.update_risk_score(saved.id, no_show_risk)
+    except Exception as e:
+        print(f"ML prediction failed (non-fatal): {e}")
 
-        Raw SQL equivalent:
-            SELECT a.*
-            FROM appointments a
-            WHERE a.doctor_id = :doctor_id
-              AND a.appointment_date BETWEEN CURRENT_DATE
-                                         AND CURRENT_DATE + INTERVAL ':days days'
-              AND a.status = 'booked'
-            ORDER BY a.appointment_date, a.time_slot;
+    await db.commit()
 
-        EXPLAIN ANALYZE (expected):
-            Index Scan using ix_appointments_doctor_date on appointments
-              Index Cond: (doctor_id = ? AND appointment_date >= today AND ...)
-              Filter: (status = 'booked')
+    return {
+        "id": str(saved.id),
+        "doctor_id": str(saved.doctor_id),
+        "appointment_date": str(saved.appointment_date),
+        "time_slot": saved.time_slot,
+        "status": saved.status.value,
+        "no_show_risk": no_show_risk,
+        "message": "Appointment booked successfully",
+    }
 
-        Optimising index: ix_appointments_doctor_date (doctor_id, appointment_date)
-        """
-        today    = date.today()
-        end_date = today + timedelta(days=days_ahead)
 
-        result = await self.session.execute(
-            select(Appointment)
-            .where(
-                Appointment.doctor_id       == doctor_id,
-                Appointment.appointment_date >= today,
-                Appointment.appointment_date <= end_date,
-                Appointment.status           == AppointmentStatus.BOOKED,
-            )
-            .order_by(Appointment.appointment_date, Appointment.time_slot)
-        )
-        return result.scalars().all()
+# ─────────────────────────────────────────────────────────────────────────────
+# LIST — patient sees their own appointments
+# ─────────────────────────────────────────────────────────────────────────────
 
-    # ─────────────────────────────────────────────────────────────────────────
-    # ML FEATURE AGGREGATION — single subquery, no N+1
-    # ─────────────────────────────────────────────────────────────────────────
+@router.get("/my")
+async def get_my_appointments(
+    db: AsyncSession = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    patient_id = uuid.UUID(current_user.id)
 
-    async def get_patient_ml_history(
-        self, patient_id: uuid.UUID
-    ) -> dict:
-        """
-        Aggregates prior_appointment_count and prior_no_show_count for ML
-        feature building.  Single query — never call this in a loop.
+    result = await db.execute(
+        select(Appointment)
+        .options(selectinload(Appointment.doctor))
+        .where(Appointment.patient_id == patient_id)
+        .order_by(Appointment.appointment_date.desc(), Appointment.time_slot.desc())
+    )
+    appts = result.scalars().all()
 
-        ORM version: (below)
-
-        Raw SQL equivalent:
-            SELECT
-                COUNT(*)                                         AS prior_appointment_count,
-                SUM(CASE WHEN status = 'no_show' THEN 1 ELSE 0 END) AS prior_no_show_count
-            FROM appointments
-            WHERE patient_id = :patient_id
-              AND status IN ('completed', 'no_show', 'cancelled');
-
-        EXPLAIN ANALYZE (expected):
-            Aggregate (cost=8.50..8.51 rows=1 width=16)
-              -> Index Scan using ix_appointments_patient_status on appointments
-                   Index Cond: (patient_id = ?)
-                   Filter: (status = ANY ('{completed,no_show,cancelled}'))
-
-        Optimising index: ix_appointments_patient_status (patient_id, status)
-        """
-        terminal_statuses = [
-            AppointmentStatus.COMPLETED,
-            AppointmentStatus.NO_SHOW,
-            AppointmentStatus.CANCELLED,
-        ]
-
-        result = await self.session.execute(
-            select(
-                func.count().label("prior_appointment_count"),
-                func.sum(
-                    case(
-                        (Appointment.status == AppointmentStatus.NO_SHOW, 1),
-                        else_=0,
-                    )
-                ).label("prior_no_show_count"),
-            ).where(
-                Appointment.patient_id == patient_id,
-                Appointment.status.in_(terminal_statuses),
-            )
-        )
-        row = result.one()
-        return {
-            "prior_appointment_count": int(row.prior_appointment_count or 0),
-            "prior_no_show_count":     int(row.prior_no_show_count     or 0),
+    return [
+        {
+            "id": str(a.id),
+            "doctor_name": a.doctor.full_name if a.doctor else "Unknown",
+            "specialization": (a.doctor.specialization or "Specialist") if a.doctor else "Unknown",
+            "appointment_date": str(a.appointment_date),
+            "time_slot": a.time_slot,
+            "status": a.status.value,
+            "no_show_risk": a.no_show_risk,
+            "booked_at": str(a.booked_at),
         }
+        for a in appts
+    ]
 
-    # ─────────────────────────────────────────────────────────────────────────
-    # STATUS TRANSITIONS — soft-delete pattern via status field
-    # ─────────────────────────────────────────────────────────────────────────
 
-    async def cancel(self, appointment_id: uuid.UUID) -> bool:
-        """
-        Soft-delete: transitions booked → cancelled.
-        Returns True if affected, False if not found or not in booked state.
-        """
-        result = await self.session.execute(
-            update(Appointment)
-            .where(
-                Appointment.id     == appointment_id,
-                Appointment.status == AppointmentStatus.BOOKED,
-            )
-            .values(status=AppointmentStatus.CANCELLED)
-            .returning(Appointment.id)
+# ─────────────────────────────────────────────────────────────────────────────
+# CANCEL — patient cancels their own booked appointment
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.patch("/{appointment_id}/cancel")
+async def cancel_appointment(
+    appointment_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    patient_id = uuid.UUID(current_user.id)
+
+    appt = await db.get(Appointment, appointment_id)
+    if not appt:
+        raise HTTPException(status_code=404, detail="Appointment not found")
+
+    if appt.patient_id != patient_id:
+        raise HTTPException(status_code=403, detail="Forbidden — not your appointment")
+
+    appt_repo = AppointmentRepository(db)
+    success = await appt_repo.cancel(appointment_id)
+
+    if not success:
+        raise HTTPException(status_code=400, detail="Appointment cannot be cancelled (already completed or cancelled)")
+
+    await db.commit()
+    return {"message": "Appointment cancelled successfully"}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# AVAILABLE SLOTS — check which slots are free for a doctor on a date
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.get("/available-slots")
+async def get_available_slots(
+    doctor_id: uuid.UUID,
+    appointment_date: date,
+    db: AsyncSession = Depends(get_db),
+):
+    if appointment_date < date.today():
+        raise HTTPException(status_code=400, detail="Date cannot be in the past")
+
+    # All possible slots
+    all_slots = [
+        "09:00", "09:30", "10:00", "10:30", "11:00", "11:30",
+        "12:00", "12:30", "14:00", "14:30", "15:00", "15:30",
+        "16:00", "16:30", "17:00",
+    ]
+
+    # Fetch already-booked slots for this doctor on this date
+    result = await db.execute(
+        select(Appointment.time_slot).where(
+            Appointment.doctor_id == doctor_id,
+            Appointment.appointment_date == appointment_date,
+            Appointment.status == AppointmentStatus.BOOKED,
         )
-        return result.scalar() is not None
+    )
+    booked_slots = {row[0] for row in result.fetchall()}
 
-    async def mark_completed(self, appointment_id: uuid.UUID) -> bool:
-        result = await self.session.execute(
-            update(Appointment)
-            .where(
-                Appointment.id     == appointment_id,
-                Appointment.status == AppointmentStatus.BOOKED,
-            )
-            .values(status=AppointmentStatus.COMPLETED)
-            .returning(Appointment.id)
-        )
-        return result.scalar() is not None
-
-    async def mark_no_show(self, appointment_id: uuid.UUID) -> bool:
-        result = await self.session.execute(
-            update(Appointment)
-            .where(
-                Appointment.id     == appointment_id,
-                Appointment.status == AppointmentStatus.BOOKED,
-            )
-            .values(status=AppointmentStatus.NO_SHOW)
-            .returning(Appointment.id)
-        )
-        return result.scalar() is not None
-
-    async def update_risk_score(
-        self, appointment_id: uuid.UUID, risk: float
-    ) -> bool:
-        """
-        Stores the ML no-show probability on the appointment row.
-        CHECK(0 <= no_show_risk <= 1) enforced at DB level.
-        """
-        if not (0.0 <= risk <= 1.0):
-            raise ValueError(f"no_show_risk must be in [0,1], got {risk}")
-        result = await self.session.execute(
-            update(Appointment)
-            .where(Appointment.id == appointment_id)
-            .values(no_show_risk=risk)
-            .returning(Appointment.id)
-        )
-        return result.scalar() is not None
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # HIGH-RISK PATIENTS — for proactive outreach batch
-    # ─────────────────────────────────────────────────────────────────────────
-
-    async def get_high_risk_upcoming(
-        self,
-        *,
-        risk_threshold: float = 0.4,
-        days_ahead: int = 3,
-        limit: int = 500,
-    ) -> Sequence[Appointment]:
-        """
-        Fetches booked appointments within `days_ahead` days where
-        no_show_risk >= threshold. Used by the reminder/outreach batch job.
-
-        Raw SQL equivalent:
-            SELECT a.*
-            FROM appointments a
-            WHERE a.status = 'booked'
-              AND a.appointment_date BETWEEN CURRENT_DATE
-                                         AND CURRENT_DATE + :days
-              AND a.no_show_risk >= :threshold
-              AND a.sms_reminder_sent = FALSE
-            ORDER BY a.no_show_risk DESC
-            LIMIT :limit;
-
-        Index used: ix_appointments_doctor_date (partial scan) + filter on risk
-        """
-        today    = date.today()
-        end_date = today + timedelta(days=days_ahead)
-
-        result = await self.session.execute(
-            select(Appointment)
-            .where(
-                Appointment.status           == AppointmentStatus.BOOKED,
-                Appointment.appointment_date >= today,
-                Appointment.appointment_date <= end_date,
-                Appointment.no_show_risk     >= risk_threshold,
-                Appointment.sms_reminder_sent == False,   # noqa: E712
-            )
-            .order_by(Appointment.no_show_risk.desc())
-            .limit(limit)
-        )
-        return result.scalars().all()
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # Soft-delete override (status-based, not is_active)
-    # ─────────────────────────────────────────────────────────────────────────
-
-    async def soft_delete(self, appointment_id: uuid.UUID) -> bool:
-        """Overrides BaseRepository — appointments use status, not is_active."""
-        return await self.cancel(appointment_id)
+    return {
+        "doctor_id": str(doctor_id),
+        "date": str(appointment_date),
+        "available_slots": [s for s in all_slots if s not in booked_slots],
+        "booked_slots": list(booked_slots),
+    }
