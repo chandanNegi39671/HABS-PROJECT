@@ -189,7 +189,7 @@ class AppointmentRepository(BaseRepository[Appointment]):
             .values(status=AppointmentStatus.CANCELLED)
             .returning(Appointment.id)
         )
-        return result.scalar_one_or_none() is not None
+        return result.scalar() is not None
 
     async def mark_completed(self, appointment_id: uuid.UUID) -> bool:
         result = await self.session.execute(
@@ -201,7 +201,7 @@ class AppointmentRepository(BaseRepository[Appointment]):
             .values(status=AppointmentStatus.COMPLETED)
             .returning(Appointment.id)
         )
-        return result.scalar_one_or_none() is not None
+        return result.scalar() is not None
 
     async def mark_no_show(self, appointment_id: uuid.UUID) -> bool:
         result = await self.session.execute(
@@ -213,7 +213,7 @@ class AppointmentRepository(BaseRepository[Appointment]):
             .values(status=AppointmentStatus.NO_SHOW)
             .returning(Appointment.id)
         )
-        return result.scalar_one_or_none() is not None
+        return result.scalar() is not None
 
     async def update_risk_score(
         self, appointment_id: uuid.UUID, risk: float
@@ -230,7 +230,7 @@ class AppointmentRepository(BaseRepository[Appointment]):
             .values(no_show_risk=risk)
             .returning(Appointment.id)
         )
-        return result.scalar_one_or_none() is not None
+        return result.scalar() is not None
 
     # ─────────────────────────────────────────────────────────────────────────
     # HIGH-RISK PATIENTS — for proactive outreach batch
