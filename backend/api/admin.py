@@ -1,215 +1,227 @@
-"""
-HABS — Appointments API Router
-Handles booking, listing, and cancellation for patients.
-"""
-
 import uuid
-from datetime import date, datetime, timedelta
-
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, status, Request
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
-from sqlalchemy.orm import selectinload
-
+from sqlalchemy import select, func
 from habs_db.repositories.database import get_db
-from habs_db.repositories.appointments import AppointmentRepository
-from habs_db.models import Appointment, AppointmentStatus, User, Doctor
-from api.schemas import AppointmentBook
-from security import get_current_user
+from habs_db.models import User, Doctor, Appointment, AppointmentStatus
+from habs_db.settings import get_settings
+from jose import jwt, JWTError
 
 router = APIRouter()
+settings = get_settings()
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# BOOK — patient books an appointment
-# ─────────────────────────────────────────────────────────────────────────────
-
-@router.post("/book", status_code=status.HTTP_201_CREATED)
-async def book_appointment(
-    data: AppointmentBook,
-    request: Request,
-    db: AsyncSession = Depends(get_db),
-    current_user=Depends(get_current_user),
-):
-    patient_id = uuid.UUID(current_user.id)
-
-    # Validate appointment date is not in the past
-    if data.appointment_date < date.today():
-        raise HTTPException(status_code=400, detail="Cannot book an appointment in the past")
-
-    # Derive appointment_hour and lead_time_days from slot and date
+async def verify_admin(req: Request):
+    auth_header = req.headers.get("Authorization")
+    if not auth_header or not auth_header.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    
+    token = auth_header.split(" ")[1]
     try:
-        appointment_hour = int(data.time_slot.split(":")[0])
-    except (ValueError, AttributeError):
-        raise HTTPException(status_code=400, detail="Invalid time_slot format — expected HH:MM")
+        payload = jwt.decode(token, settings.SECRET_KEY, algorithms=["HS256"])
+        if payload.get("role") != "admin":
+            raise HTTPException(status_code=403, detail="Forbidden: Admin access required")
+        return payload
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Invalid token")
 
-    lead_time_days = (data.appointment_date - date.today()).days
-
-    # Fetch patient ML history for risk prediction
-    appt_repo = AppointmentRepository(db)
-    ml_history = await appt_repo.get_patient_ml_history(patient_id)
-
-    # Fetch patient record for ML features
-    patient_result = await db.execute(select(User).where(User.id == patient_id))
-    patient = patient_result.scalar_one_or_none()
-    if not patient:
-        raise HTTPException(status_code=404, detail="Patient record not found")
-
-    # Build appointment object
-    appointment = Appointment(
-        id=uuid.uuid4(),
-        patient_id=patient_id,
-        doctor_id=data.doctor_id,
-        appointment_date=data.appointment_date,
-        time_slot=data.time_slot,
-        appointment_hour=appointment_hour,
-        lead_time_days=lead_time_days,
-        status=AppointmentStatus.BOOKED,
-    )
-
-    # Try to save (double-booking guard via UNIQUE constraint in DB)
+def send_email(to_email, subject, body):
     try:
-        saved = await appt_repo.book(appointment)
-    except ValueError as exc:
-        raise HTTPException(status_code=409, detail=str(exc))
-
-    # Run ML risk prediction if model is loaded
-    no_show_risk = None
-    try:
-        ml_model = getattr(request.app.state, "ml_model", None)
-        if ml_model is not None:
-            age = None
-            if patient.date_of_birth:
-                age = (date.today() - patient.date_of_birth).days // 365
-
-            features = [[
-                age or 30,
-                1 if (patient.gender or "").lower() == "female" else 0,
-                int(getattr(patient, "scholarship", False) or False),
-                int(getattr(patient, "hypertension", False) or False),
-                int(getattr(patient, "diabetes", False) or False),
-                int(getattr(patient, "alcoholism", False) or False),
-                int(getattr(patient, "has_chronic_condition", False) or False),
-                lead_time_days,
-                appointment_hour,
-                ml_history["prior_appointment_count"],
-                ml_history["prior_no_show_count"],
-            ]]
-            prob = ml_model.predict_proba(features)[0][1]
-            no_show_risk = round(float(prob), 4)
-            await appt_repo.update_risk_score(saved.id, no_show_risk)
+        import httpx
+        response = httpx.post(
+            "https://api.resend.com/emails",
+            headers={
+                "Authorization": f"Bearer {settings.RESEND_API_KEY}",
+                "Content-Type": "application/json"
+            },
+            json={
+                "from": "HABS Healthcare <onboarding@resend.dev>",
+                "to": [to_email],
+                "subject": subject,
+                "text": body
+            },
+            timeout=10
+        )
+        if response.status_code == 200:
+            print(f"Email sent via Resend to {to_email}")
+            return True
+        else:
+            print(f"Resend error: {response.text}")
+            return False
     except Exception as e:
-        print(f"ML prediction failed (non-fatal): {e}")
+        print(f"Failed to send email: {e}")
+        return False
 
-    await db.commit()
+@router.get("/pending-doctors", dependencies=[Depends(verify_admin)])
+async def get_pending_doctors(db: AsyncSession = Depends(get_db)):
+    result = await db.execute(
+        select(Doctor).where(Doctor.verification_status == "pending")
+    )
+    doctors = result.scalars().all()
+    return [{
+        "id": str(d.id),
+        "full_name": d.full_name,
+        "email": d.email,
+        "phone": d.phone,
+        "specialization": d.specialization or "General",
+        "created_at": str(d.created_at)
+    } for d in doctors]
 
+@router.get("/all-doctors", dependencies=[Depends(verify_admin)])
+async def get_all_doctors(db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(Doctor))
+    doctors = result.scalars().all()
+    return [{
+        "id": str(d.id),
+        "full_name": d.full_name,
+        "email": d.email,
+        "phone": d.phone,
+        "specialization": d.specialization or "General",
+        "verification_status": d.verification_status,
+        "rejection_reason": d.rejection_reason
+    } for d in doctors]
+
+@router.get("/stats", dependencies=[Depends(verify_admin)])
+async def get_stats(db: AsyncSession = Depends(get_db)):
+    # Total patients (Users who are not doctors and not admins)
+    # Actually, let's just count all Users for simplicity, or those with role patient.
+    # Since we don't have a role column in User model, we'll assume Users not in Doctor table are patients.
+    # Count only patients (users NOT in doctors table)
+    doctor_subq = select(Doctor.id)
+    patients_count = await db.scalar(
+        select(func.count(User.id)).where(User.id.not_in(doctor_subq))
+    )
+    
+    # Approved doctors
+    approved_doctors_count = await db.scalar(
+        select(func.count(Doctor.id)).where(Doctor.verification_status == "approved")
+    )
+    
+    # Pending doctors
+    pending_doctors_count = await db.scalar(
+        select(func.count(Doctor.id)).where(Doctor.verification_status == "pending")
+    )
+    
+    # Total appointments
+    appointments_count = await db.scalar(select(func.count(Appointment.id)))
+    
+    # Total high risk appointments
+    high_risk_count = await db.scalar(
+        select(func.count(Appointment.id)).where(Appointment.no_show_risk >= 0.6)
+    )
+    
     return {
-        "id": str(saved.id),
-        "doctor_id": str(saved.doctor_id),
-        "appointment_date": str(saved.appointment_date),
-        "time_slot": saved.time_slot,
-        "status": saved.status.value,
-        "no_show_risk": no_show_risk,
-        "message": "Appointment booked successfully",
+        "patients_count": patients_count,
+        "approved_doctors_count": approved_doctors_count,
+        "pending_doctors_count": pending_doctors_count,
+        "appointments_count": appointments_count,
+        "high_risk_appointments_count": high_risk_count
     }
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# LIST — patient sees their own appointments
-# ─────────────────────────────────────────────────────────────────────────────
-
-@router.get("/my")
-async def get_my_appointments(
-    db: AsyncSession = Depends(get_db),
-    current_user=Depends(get_current_user),
-):
-    patient_id = uuid.UUID(current_user.id)
-
+@router.get("/patients", dependencies=[Depends(verify_admin)])
+async def get_patients(db: AsyncSession = Depends(get_db)):
+    doctor_subq = select(Doctor.id)
     result = await db.execute(
-        select(Appointment)
-        .options(selectinload(Appointment.doctor))
-        .where(Appointment.patient_id == patient_id)
-        .order_by(Appointment.appointment_date.desc(), Appointment.time_slot.desc())
+        select(User).where(User.id.not_in(doctor_subq)).order_by(User.created_at.desc())
     )
-    appts = result.scalars().all()
-
+    patients = result.scalars().all()
     return [
         {
-            "id": str(a.id),
-            "doctor_name": a.doctor.full_name if a.doctor else "Unknown",
-            "specialization": (a.doctor.specialization or "Specialist") if a.doctor else "Unknown",
-            "appointment_date": str(a.appointment_date),
-            "time_slot": a.time_slot,
-            "status": a.status.value,
-            "no_show_risk": a.no_show_risk,
-            "booked_at": str(a.booked_at),
+            "id": str(p.id),
+            "full_name": p.full_name,
+            "email": p.email,
+            "phone": p.phone,
+            "gender": p.gender,
+            "is_active": p.is_active,
+            "created_at": str(p.created_at),
         }
-        for a in appts
+        for p in patients
     ]
 
+@router.patch("/doctors/{doctor_id}/approve", dependencies=[Depends(verify_admin)])
+async def approve_doctor(doctor_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
+    doctor = await db.get(Doctor, doctor_id)
+    if not doctor:
+        raise HTTPException(status_code=404, detail="Doctor not found")
+    
+    doctor.verification_status = "approved"
+    doctor.is_active = True  # FIX: was missing — doctor list queries Doctor.is_active
+    db.add(doctor)
+    
+    user = await db.get(User, doctor_id)
+    if user:
+        user.is_active = True
+        db.add(user)
+    
+    await db.commit()
+    
+    subject = "HABS — Your account has been approved!"
+    body = f"""Congratulations {doctor.full_name}!
+Your HABS doctor account has been approved.
+You can now login at: http://localhost:5173/login
+Welcome to the HABS Healthcare Team!"""
+    
+    send_email(doctor.email, subject, body)
+    
+    return {"message": "Doctor approved successfully"}
 
-# ─────────────────────────────────────────────────────────────────────────────
-# CANCEL — patient cancels their own booked appointment
-# ─────────────────────────────────────────────────────────────────────────────
+@router.patch("/doctors/{doctor_id}/reject", dependencies=[Depends(verify_admin)])
+async def reject_doctor(doctor_id: uuid.UUID, data: dict, db: AsyncSession = Depends(get_db)):
+    reason = data.get("reason")
+    if not reason:
+        raise HTTPException(status_code=400, detail="Rejection reason is required")
+        
+    doctor = await db.get(Doctor, doctor_id)
+    if not doctor:
+        raise HTTPException(status_code=404, detail="Doctor not found")
+    
+    doctor.verification_status = "rejected"
+    doctor.rejection_reason = reason
+    db.add(doctor)
+    
+    # User stays is_active = False (default)
+    
+    await db.commit()
+    
+    subject = "HABS — Account Verification Update"
+    body = f"""Dear {doctor.full_name},
+We reviewed your HABS account application.
+Unfortunately it was not approved.
+Reason: {reason}
+For queries contact: ramola27041980@gmail.com"""
+    
+    send_email(doctor.email, subject, body)
+    
+    return {"message": "Doctor rejected"}
 
-@router.patch("/{appointment_id}/cancel")
-async def cancel_appointment(
-    appointment_id: uuid.UUID,
-    db: AsyncSession = Depends(get_db),
-    current_user=Depends(get_current_user),
-):
-    patient_id = uuid.UUID(current_user.id)
+@router.patch("/doctors/{doctor_id}/revoke", dependencies=[Depends(verify_admin)])
+async def revoke_doctor_access(doctor_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
+    """Revoke an approved doctor's access. They must re-apply to regain entry."""
+    doctor = await db.get(Doctor, doctor_id)
+    if not doctor:
+        raise HTTPException(status_code=404, detail="Doctor not found")
 
-    appt = await db.get(Appointment, appointment_id)
-    if not appt:
-        raise HTTPException(status_code=404, detail="Appointment not found")
+    doctor.is_active = False
+    doctor.verification_status = "revoked"
+    db.add(doctor)
 
-    if appt.patient_id != patient_id:
-        raise HTTPException(status_code=403, detail="Forbidden — not your appointment")
-
-    appt_repo = AppointmentRepository(db)
-    success = await appt_repo.cancel(appointment_id)
-
-    if not success:
-        raise HTTPException(status_code=400, detail="Appointment cannot be cancelled (already completed or cancelled)")
+    user = await db.get(User, doctor_id)
+    if user:
+        user.is_active = False
+        db.add(user)
 
     await db.commit()
-    return {"message": "Appointment cancelled successfully"}
 
+    subject = "HABS — Access Revoked"
+    body = f"""Dear {doctor.full_name},
 
-# ─────────────────────────────────────────────────────────────────────────────
-# AVAILABLE SLOTS — check which slots are free for a doctor on a date
-# ─────────────────────────────────────────────────────────────────────────────
+Your HABS doctor account access has been revoked by the administrator.
 
-@router.get("/available-slots")
-async def get_available_slots(
-    doctor_id: uuid.UUID,
-    appointment_date: date,
-    db: AsyncSession = Depends(get_db),
-):
-    if appointment_date < date.today():
-        raise HTTPException(status_code=400, detail="Date cannot be in the past")
+If you believe this is an error or wish to re-apply in the future,
+please contact us at: ramola27041980@gmail.com
 
-    # All possible slots
-    all_slots = [
-        "09:00", "09:30", "10:00", "10:30", "11:00", "11:30",
-        "12:00", "12:30", "14:00", "14:30", "15:00", "15:30",
-        "16:00", "16:30", "17:00",
-    ]
+Thank you for your time with HABS Healthcare."""
 
-    # Fetch already-booked slots for this doctor on this date
-    result = await db.execute(
-        select(Appointment.time_slot).where(
-            Appointment.doctor_id == doctor_id,
-            Appointment.appointment_date == appointment_date,
-            Appointment.status == AppointmentStatus.BOOKED,
-        )
-    )
-    booked_slots = {row[0] for row in result.fetchall()}
+    send_email(doctor.email, subject, body)
 
-    return {
-        "doctor_id": str(doctor_id),
-        "date": str(appointment_date),
-        "available_slots": [s for s in all_slots if s not in booked_slots],
-        "booked_slots": list(booked_slots),
-    }
+    return {"message": "Doctor access revoked successfully"}
