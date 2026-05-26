@@ -15,6 +15,7 @@ from habs_db.repositories.database import get_db
 from habs_db.repositories.appointments import AppointmentRepository
 from habs_db.models import Appointment, AppointmentStatus, User, Doctor
 from api.schemas import AppointmentBook
+from api.auth import send_email          # ← ADDED: booking confirmation email
 from security import get_current_user
 
 router = APIRouter()
@@ -102,6 +103,30 @@ async def book_appointment(
         print(f"ML prediction failed (non-fatal): {e}")
 
     await db.commit()
+
+    # ── ADDED: Booking confirmation email ────────────────────────────────────
+    try:
+        doctor_result = await db.execute(select(Doctor).where(Doctor.id == data.doctor_id))
+        doctor = doctor_result.scalar_one_or_none()
+        doctor_name = doctor.full_name if doctor else "your doctor"
+
+        subject = "HABS — Appointment Confirmation ✅"
+        body = (
+            f"Hi {patient.full_name},\n\n"
+            f"Your appointment has been successfully booked!\n\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"  Doctor   : {doctor_name}\n"
+            f"  Date     : {data.appointment_date}\n"
+            f"  Time     : {data.time_slot}\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"Please arrive 10 minutes before your scheduled time.\n\n"
+            f"To cancel, visit your dashboard on the HABS app.\n\n"
+            f"— HABS Healthcare Team"
+        )
+        send_email(patient.email, subject, body)
+    except Exception as e:
+        print(f"Booking confirmation email failed (non-fatal): {e}")
+    # ─────────────────────────────────────────────────────────────────────────
 
     return {
         "id": str(saved.id),
